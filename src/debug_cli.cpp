@@ -5,6 +5,7 @@
  */
 
 #include "debug_cli.h"
+#include "mmap_storage.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -31,7 +32,135 @@ extern uint8_t LED_GetMode(void);
 static cli_command_t cmd_table[CLI_MAX_COMMANDS];
 static uint8_t cmd_count = 0;
 
-/* ── Ring Buffer (USB + BLE 통합 큐) ────────────────────────── */
+/* ── PSRAM Test Buffer Management ────────────────────────────── */
+#define MAX_PSRAM_BLOCKS 8
+static void* g_psram_blocks[MAX_PSRAM_BLOCKS] = {nullptr};
+static size_t g_psram_block_sizes[MAX_PSRAM_BLOCKS] = {0};
+static int g_psram_block_count = 0;
+
+bool PSRAM_AllocMB(int mb)
+{
+    if (mb <= 0 || g_psram_block_count >= MAX_PSRAM_BLOCKS) return false;
+    size_t bytes = (size_t)mb * 1024 * 1024;
+    void *ptr = ps_malloc(bytes);
+    if (ptr == nullptr) {
+        return false;
+    }
+    // 메모리 채우기 및 무결성 검증 패턴 기록
+    memset(ptr, 0xAA, bytes);
+    g_psram_blocks[g_psram_block_count] = ptr;
+    g_psram_block_sizes[g_psram_block_count] = bytes;
+    g_psram_block_count++;
+    return true;
+}
+
+void PSRAM_FreeAll(void)
+{
+    for (int i = 0; i < g_psram_block_count; i++) {
+        if (g_psram_blocks[i] != nullptr) {
+            free(g_psram_blocks[i]);
+            g_psram_blocks[i] = nullptr;
+            g_psram_block_sizes[i] = 0;
+        }
+    }
+    g_psram_block_count = 0;
+}
+
+size_t PSRAM_GetAllocatedBytes(void)
+{
+    size_t total = 0;
+    for (int i = 0; i < g_psram_block_count; i++) {
+        total += g_psram_block_sizes[i];
+    }
+    return total;
+}
+
+static int cli_cmd_psram(int argc, char **argv)
+{
+    if (argc < 2) {
+        CLI_Print("Usage: psram <status|alloc|free|speed>\r\n");
+        CLI_Print("  psram status       - Show 8MB PSRAM free/used\r\n");
+        CLI_Print("  psram alloc <MB>   - Allocate N megabytes (e.g. psram alloc 2)\r\n");
+        CLI_Print("  psram free         - Release all allocated test buffers\r\n");
+        CLI_Print("  psram speed        - Run Read/Write throughput benchmark\r\n");
+        return -1;
+    }
+
+    if (strcmp(argv[1], "status") == 0) {
+        uint32_t total = ESP.getPsramSize();
+        uint32_t freeP = ESP.getFreePsram();
+        uint32_t used  = total - freeP;
+        float pct = total ? ((float)used / total) * 100.0f : 0.0f;
+        CLI_Printf("[PSRAM] Total: %lu bytes (%.2f MB)\r\n", (unsigned long)total, (float)total / (1024*1024));
+        CLI_Printf("[PSRAM] Used : %lu bytes (%.2f MB, %.1f%%)\r\n", (unsigned long)used, (float)used / (1024*1024), pct);
+        CLI_Printf("[PSRAM] Free : %lu bytes (%.2f MB)\r\n", (unsigned long)freeP, (float)freeP / (1024*1024));
+        CLI_Printf("[PSRAM] Custom Test Allocated: %u MB (%d blocks)\r\n", (unsigned int)(PSRAM_GetAllocatedBytes() / (1024*1024)), g_psram_block_count);
+    }
+    else if (strcmp(argv[1], "alloc") == 0) {
+        if (argc < 3) {
+            CLI_Print("Usage: psram alloc <MB>  (1 to 6)\r\n");
+            return -1;
+        }
+        int mb = atoi(argv[2]);
+        if (mb <= 0 || mb > 6) {
+            CLI_Print("Error: MB must be between 1 and 6\r\n");
+            return -1;
+        }
+        CLI_Printf("[PSRAM] Allocating %d MB...\r\n", mb);
+        if (PSRAM_AllocMB(mb)) {
+            CLI_Printf("[PSRAM] Successfully allocated %d MB in Octal PSRAM!\r\n", mb);
+            CLI_Printf("[PSRAM] Current Total Test Buffer: %u MB\r\n", (unsigned int)(PSRAM_GetAllocatedBytes() / (1024*1024)));
+        } else {
+            CLI_Print("[PSRAM] Error: Memory allocation failed!\r\n");
+            return -1;
+        }
+    }
+    else if (strcmp(argv[1], "free") == 0) {
+        PSRAM_FreeAll();
+        CLI_Print("[PSRAM] All test buffers released!\r\n");
+    }
+    else if (strcmp(argv[1], "speed") == 0) {
+        CLI_Print("[PSRAM] Benchmark: Allocating 1MB for Read/Write test...\r\n");
+        const size_t benchSize = 1024 * 1024; // 1MB
+        uint32_t *p = (uint32_t *)ps_malloc(benchSize);
+        if (!p) {
+            CLI_Print("[PSRAM] Alloc failed for benchmark!\r\n");
+            return -1;
+        }
+        uint32_t words = benchSize / sizeof(uint32_t);
+
+        // Write test
+        uint32_t t0 = micros();
+        for (uint32_t i = 0; i < words; i++) {
+            p[i] = 0xA5A50000 + i;
+        }
+        uint32_t writeUs = micros() - t0;
+
+        // Read & verify test
+        t0 = micros();
+        bool ok = true;
+        for (uint32_t i = 0; i < words; i++) {
+            if (p[i] != (0xA5A50000 + i)) {
+                ok = false;
+                break;
+            }
+        }
+        uint32_t readUs = micros() - t0;
+        free(p);
+
+        float writeMBs = (float)benchSize / (writeUs ? writeUs : 1);
+        float readMBs  = (float)benchSize / (readUs ? readUs : 1);
+
+        CLI_Printf("[PSRAM] Write Speed: %.2f MB/s (%lu us)\r\n", writeMBs, (unsigned long)writeUs);
+        CLI_Printf("[PSRAM] Read Speed : %.2f MB/s (%lu us)\r\n", readMBs, (unsigned long)readUs);
+        CLI_Printf("[PSRAM] Integrity Check: %s\r\n", ok ? "PASSED (OK)" : "FAILED (DATA MISMATCH)");
+    }
+    else {
+        CLI_Printf("Unknown option: '%s'\r\n", argv[1]);
+        return -1;
+    }
+    return 0;
+}
 static volatile char     rx_ring[CLI_RX_RING_SIZE];
 static volatile uint16_t rx_head = 0;
 static volatile uint16_t rx_tail = 0;
@@ -168,18 +297,96 @@ static int cli_cmd_top(int argc, char **argv)
     uint32_t usedPsram  = totalPsram - freePsram;
     float psramUsage = totalPsram ? ((float)usedPsram / totalPsram) * 100.0f : 0.0f;
 
+    uint32_t totalFlash = ESP.getFlashChipSize();
+    uint32_t appFlash   = ESP.getSketchSize();
+    float flashUsage = totalFlash ? ((float)appFlash / totalFlash) * 100.0f : 0.0f;
+
     float tempC = temperatureRead();
 
     CLI_Print("\r\n================ ESP32-S3 SYSTEM STATS ================\r\n");
     CLI_Printf("  CPU Frequency : %lu MHz\r\n", (unsigned long)getCpuFrequencyMhz());
     CLI_Printf("  Chip Temp     : %.1f °C\r\n", tempC);
-    CLI_Printf("  Internal Heap : %lu / %lu bytes (%.1f%% used)\r\n", (unsigned long)usedHeap, (unsigned long)totalHeap, heapUsage);
+    CLI_Printf("  16MB SPI Flash: %.2f / %.2f MB (%.1f%% used by app)\r\n", (float)appFlash / (1024*1024), (float)totalFlash / (1024*1024), flashUsage);
     CLI_Printf("  8MB OPI PSRAM : %lu / %lu bytes (%.1f%% used)\r\n", (unsigned long)usedPsram, (unsigned long)totalPsram, psramUsage);
+    CLI_Printf("  Internal Heap : %lu / %lu bytes (%.1f%% used)\r\n", (unsigned long)usedHeap, (unsigned long)totalHeap, heapUsage);
     if (WiFi.status() == WL_CONNECTED) {
         CLI_Printf("  Wi-Fi RSSI    : %d dBm (SSID: %s)\r\n", WiFi.RSSI(), WiFi.SSID().c_str());
     }
     CLI_Printf("  Uptime        : %lu sec\r\n", (unsigned long)(millis() / 1000));
     CLI_Print("=======================================================\r\n");
+    return 0;
+}
+
+static int cli_cmd_mmap(int argc, char **argv)
+{
+    if (argc < 2) {
+        CLI_Print("Usage: mmap <status|write|tag|dump>\r\n");
+        CLI_Print("  mmap status          - View MMAP pointer, boot count & memo\r\n");
+        CLI_Print("  mmap write <text>    - Save non-volatile string to 128KB Flash\r\n");
+        CLI_Print("  mmap tag <dev_name>  - Save device tag string\r\n");
+        CLI_Print("  mmap dump [len]      - Hex dump of 128KB flash storage\r\n");
+        return -1;
+    }
+
+    if (strcmp(argv[1], "status") == 0) {
+        const mmap_nv_header_t *hdr = MMAP_GetHeader();
+        if (!hdr) {
+            CLI_Print("[MMAP] Error: Not initialized\r\n");
+            return -1;
+        }
+        CLI_Print("\r\n================ 128KB FLASH MMAP STORAGE ================\r\n");
+        CLI_Printf("  Physical Flash Addr : 0x%08lX (Offset in 16MB)\r\n", (unsigned long)MMAP_GetPhysicalAddress());
+        CLI_Printf("  Virtual CPU Pointer : %p (MMU Mapped)\r\n", (void*)MMAP_GetVirtualAddress());
+        CLI_Printf("  Partition Size      : %u KB (131,072 Bytes)\r\n", (unsigned int)(MMAP_STORAGE_SIZE / 1024));
+        CLI_Printf("  Non-Volatile Boots  : %lu times\r\n", (unsigned long)hdr->boot_count);
+        CLI_Printf("  Flash Write Count   : %lu times\r\n", (unsigned long)hdr->write_count);
+        CLI_Printf("  Device Tag          : %s\r\n", hdr->device_tag);
+        CLI_Printf("  Saved User Memo     : %s\r\n", hdr->user_memo);
+        CLI_Print("==========================================================\r\n");
+    }
+    else if (strcmp(argv[1], "write") == 0) {
+        if (argc < 3) {
+            CLI_Print("Usage: mmap write <text to save in flash>\r\n");
+            return -1;
+        }
+        // 공백 포함 전체 텍스트 조합
+        char memo_buf[256] = {0};
+        for (int i = 2; i < argc; i++) {
+            strncat(memo_buf, argv[i], sizeof(memo_buf) - strlen(memo_buf) - 2);
+            if (i < argc - 1) strncat(memo_buf, " ", sizeof(memo_buf) - strlen(memo_buf) - 1);
+        }
+        if (MMAP_SaveMemo(memo_buf)) {
+            CLI_Printf("[MMAP] Successfully written to 128KB Flash!\r\n");
+            CLI_Printf("[MMAP] Verified via mmap pointer: \"%s\"\r\n", MMAP_GetHeader()->user_memo);
+        } else {
+            CLI_Print("[MMAP] Error: Flash write failed!\r\n");
+            return -1;
+        }
+    }
+    else if (strcmp(argv[1], "tag") == 0) {
+        if (argc < 3) {
+            CLI_Print("Usage: mmap tag <device_name>\r\n");
+            return -1;
+        }
+        if (MMAP_SetDeviceTag(argv[2])) {
+            CLI_Printf("[MMAP] Device tag updated: %s\r\n", argv[2]);
+        } else {
+            CLI_Print("[MMAP] Error: Failed to update tag\r\n");
+            return -1;
+        }
+    }
+    else if (strcmp(argv[1], "dump") == 0) {
+        size_t len = 64;
+        if (argc >= 3) len = constrain(atoi(argv[2]), 16, 256);
+        char dump_buf[1024];
+        MMAP_HexDump(0, len, dump_buf, sizeof(dump_buf));
+        CLI_Print("\r\n--- 128KB MMAP Storage Hex Dump ---\r\n");
+        CLI_Print(dump_buf);
+    }
+    else {
+        CLI_Printf("Unknown option: '%s'\r\n", argv[1]);
+        return -1;
+    }
     return 0;
 }
 
@@ -370,6 +577,8 @@ void CLI_Init(void)
     CLI_RegisterCommand("led",     cli_cmd_led,     "Set RGB color directly (Usage: led <r> <g> <b>)");
     CLI_RegisterCommand("rgb",     cli_cmd_rgb,     "Set LED mode (Usage: rgb rainbow|pulse|off)");
     CLI_RegisterCommand("bright",  cli_cmd_bright,  "Set LED brightness (Usage: bright 0-255)");
+    CLI_RegisterCommand("psram",   cli_cmd_psram,   "8MB PSRAM test (status, alloc <MB>, free, speed)");
+    CLI_RegisterCommand("mmap",    cli_cmd_mmap,    "128KB Flash MMAP NV-Storage (status, write, tag, dump)");
     CLI_RegisterCommand("wifi",    cli_cmd_wifi,    "Wi-Fi status, scan, connect");
     CLI_RegisterCommand("hello",   cli_cmd_hello,   "Print Hello World (Usage: hello [count])");
     CLI_RegisterCommand("reboot",  cli_cmd_reboot,  "Software reset the MCU");

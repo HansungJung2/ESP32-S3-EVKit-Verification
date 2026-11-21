@@ -37,3 +37,8 @@ void CLI_Print(const char *str);
 void CLI_Printf(const char *format, ...);
 bool CLI_IsBLEConnected(void);
 String CLI_ExecuteWebCommand(const char *line);
+
+/* ── PSRAM Test API ─────────────────────────────────────────── */
+bool PSRAM_AllocMB(int mb);
+void PSRAM_FreeAll(void);
+size_t PSRAM_GetAllocatedBytes(void);

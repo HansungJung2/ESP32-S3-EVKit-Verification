@@ -98,12 +98,15 @@ pio device monitor
 
 ```
 ESP32-S3-EVKit-Verfication/
-├── platformio.ini                    # 보드 설정, 플래시/PSRAM 크기, 라이브러리 의존성 정의
+├── platformio.ini                    # 보드 설정, 플래시(16MB)/PSRAM(8MB OPI) 활성화, 라이브러리 의존성 정의
+├── partitions_16MB.csv               # 16MB 플래시 파티션 맵 (앱 영역 + 128KB mmap_store 비휘발성 영역)
 ├── ESP32-S3-EVKit-Verification-Manual.md # 본 매뉴얼 문서
 └── src/
     ├── main.cpp                     # setup(), loop(), WebServer, FastLED 렌더러
     ├── debug_cli.h                  # CLI 셸 인터페이스 및 커맨드 구조체 정의
-    └── debug_cli.cpp                # 3중 채널(USB/BLE/Web) CLI 엔진 및 명령어 핸들러
+    ├── debug_cli.cpp                # 3중 채널(USB/BLE/Web) CLI 엔진 및 명령어 핸들러
+    ├── mmap_storage.h               # 128KB Flash MMAP 비휘발성 스토리지 헤더
+    └── mmap_storage.cpp             # esp_partition_mmap 기반 0-copy 읽기 및 플래시 쓰기 드라이버
 ```
 
 ---
@@ -120,6 +123,8 @@ ESP32-S3-EVKit-Verfication/
 | :--- | :--- | :--- |
 | **`help`** | `help` | 등록된 모든 CLI 명령어 목록 출력 |
 | **`top`** | `top` | **CPU 클럭, 칩 온도, SRAM 사용량, 8MB PSRAM 사용량, Wi-Fi RSSI 실시간 통계 출력** |
+| **`psram`** | `psram status`<br>`psram alloc <MB>`<br>`psram free`<br>`psram speed` | **8MB PSRAM 제어 및 벤치마크 (메모리 동적 할당, 해제, Read/Write 전송 속도 측정)** |
+| **`mmap`** | `mmap status`<br>`mmap write <string>`<br>`mmap dump [len]`<br>`mmap erase` | **128KB Flash MMAP 비휘발성 메모리 관리 (가상주소 매핑, 영구 데이터 기록/덤프)** |
 | **`sysinfo`** | `sysinfo` | 칩셋 스펙, MAC 주소, IP 주소 및 상태 정보 출력 |
 | **`led`** | `led <r> <g> <b>` | GPIO48 RGB LED를 수동 색상(0~255)으로 설정 (예: `led 255 0 0`) |
 | **`rgb`** | `rgb <rainbow\|pulse\|off>` | LED 프리셋 모드(무지개 순환 / 블루 숨쉬기 / 소등)로 전환 |
@@ -149,8 +154,13 @@ ESP32-S3-EVKit-Verfication/
   - **비밀번호**: `12345678`
   - **접속 주소**: `http://192.168.4.1`
 * **주요 웹 대시보드 기능**:
-  - **📊 실시간 메모리 게이지 바**: SRAM Heap 및 8MB PSRAM 사용량(KB/MB) 및 퍼센트(%) 표시
+  - **📊 실시간 메모리 게이지 바**: SRAM Heap, 8MB Octal PSRAM, 16MB Flash 사용량(KB/MB) 및 퍼센트(%) 표시
   - **📈 30초 실시간 시계열 그래프**: 1초마다 Heap/PSRAM 사용률 및 칩 내부 온도(°C)를 Canvas로 동적 렌더링
+  - **⚡ 8MB PSRAM 제어 및 벤치마크**: 웹 버튼 클릭 한 번으로 PSRAM 1MB/4MB 할당/해제 및 R/W 속도(MB/s) 측정
+  - **💾 128KB Flash MMAP 영구 저장소**: 
+    - ESP32-S3 MMU 가상 주소 매핑(`esp_partition_mmap()`)을 통한 0-Copy 읽기
+    - 웹 UI에서 메모를 입력하고 플래시에 영구 저장 (전원을 껐다 켜거나 재부팅해도 보존)
+    - 부팅 횟수(`boot_count`), 기록 횟수(`write_count`) 및 실시간 128KB Flash Hex Dump 뷰어 탑재
   - **🎨 원터치 컬러 피커 & 슬라이더**: 웹에서 색상을 고르면 GPIO48 LED가 즉각 반응
-  - **💻 웹 CLI 터미널**: 브라우저에서 `top`, `help`, `wifi scan` 등을 직접 입력하고 실행 결과를 화면에서 확인
+  - **💻 웹 CLI 터미널**: 브라우저에서 `top`, `psram`, `mmap`, `help`, `wifi scan` 등을 직접 입력하고 실행 결과를 화면에서 확인
 
