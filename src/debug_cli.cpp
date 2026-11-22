@@ -6,6 +6,8 @@
 
 #include "debug_cli.h"
 #include "mmap_storage.h"
+#include "fs_manager.h"
+#include <esp_ota_ops.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -390,6 +392,135 @@ static int cli_cmd_mmap(int argc, char **argv)
     return 0;
 }
 
+static int cli_cmd_fs(int argc, char **argv)
+{
+    if (argc < 2) {
+        CLI_Print("Usage:\r\n");
+        CLI_Print("  fs list               - List files in LittleFS\r\n");
+        CLI_Print("  fs cat <file>         - Display file content\r\n");
+        CLI_Print("  fs rm <file>          - Delete file\r\n");
+        CLI_Print("  fs write <file> <str> - Write string to file\r\n");
+        CLI_Print("  fs sample             - Create default sample files\r\n");
+        CLI_Print("  fs format             - Format 7MB LittleFS partition\r\n");
+        return -1;
+    }
+
+    if (strcmp(argv[1], "list") == 0) {
+        size_t total = FS_GetTotalBytes();
+        size_t used = FS_GetUsedBytes();
+        CLI_Printf("\r\n[LittleFS] Total: %lu bytes (%.2f MB), Used: %lu bytes (%.2f KB)\r\n",
+                   (unsigned long)total, (float)total / (1024*1024),
+                   (unsigned long)used, (float)used / 1024.0f);
+        CLI_Print("--------------------------------------------------\r\n");
+        CLI_Print(" File Name                       Size (Bytes)\r\n");
+        CLI_Print("--------------------------------------------------\r\n");
+        File root = LittleFS.open("/");
+        if (!root || !root.isDirectory()) {
+            CLI_Print("  (Failed to open root directory)\r\n");
+            return -1;
+        }
+        File file = root.openNextFile();
+        int count = 0;
+        while (file) {
+            if (!file.isDirectory()) {
+                String fname = file.name();
+                if (fname.startsWith("/")) fname = fname.substring(1);
+                CLI_Printf("  %-30s %10lu B\r\n", fname.c_str(), (unsigned long)file.size());
+                count++;
+            }
+            file = root.openNextFile();
+        }
+        if (count == 0) {
+            CLI_Print("  (No files found)\r\n");
+        }
+        CLI_Print("--------------------------------------------------\r\n");
+    } else if (strcmp(argv[1], "cat") == 0) {
+        if (argc < 3) {
+            CLI_Print("Usage: fs cat <filepath>\r\n");
+            return -1;
+        }
+        String path = argv[2];
+        if (!path.startsWith("/")) path = "/" + path;
+        if (!FS_FileExists(path.c_str())) {
+            CLI_Printf("File '%s' not found!\r\n", path.c_str());
+            return -1;
+        }
+        String content = FS_ReadFile(path.c_str());
+        CLI_Printf("\r\n--- [Content: %s (%d bytes)] ---\r\n", path.c_str(), content.length());
+        CLI_Print(content.c_str());
+        CLI_Print("\r\n--- [End of File] ---\r\n");
+    } else if (strcmp(argv[1], "rm") == 0) {
+        if (argc < 3) {
+            CLI_Print("Usage: fs rm <filepath>\r\n");
+            return -1;
+        }
+        String path = argv[2];
+        if (!path.startsWith("/")) path = "/" + path;
+        if (FS_DeleteFile(path.c_str())) {
+            CLI_Printf("[LittleFS] File '%s' deleted successfully.\r\n", path.c_str());
+        } else {
+            CLI_Printf("[LittleFS] Failed to delete '%s' (not found or error).\r\n", path.c_str());
+        }
+    } else if (strcmp(argv[1], "write") == 0) {
+        if (argc < 4) {
+            CLI_Print("Usage: fs write <filepath> <text>\r\n");
+            return -1;
+        }
+        String path = argv[2];
+        if (!path.startsWith("/")) path = "/" + path;
+        String data = "";
+        for (int i = 3; i < argc; i++) {
+            data += argv[i];
+            if (i < argc - 1) data += " ";
+        }
+        data += "\r\n";
+        if (FS_WriteFile(path.c_str(), data.c_str())) {
+            CLI_Printf("[LittleFS] Successfully wrote %d bytes to '%s'\r\n", data.length(), path.c_str());
+        } else {
+            CLI_Printf("[LittleFS] Error writing to '%s'\r\n", path.c_str());
+        }
+    } else if (strcmp(argv[1], "sample") == 0) {
+        FS_CreateSampleFiles();
+        CLI_Print("[LittleFS] Default sample files created!\r\n");
+    } else if (strcmp(argv[1], "format") == 0) {
+        CLI_Print("[LittleFS] Formatting 7MB partition, please wait...\r\n");
+        if (FS_Format()) {
+            CLI_Print("[LittleFS] Format completed successfully!\r\n");
+        } else {
+            CLI_Print("[LittleFS] Format failed!\r\n");
+        }
+    } else {
+        CLI_Printf("Unknown option: '%s'\r\n", argv[1]);
+        return -1;
+    }
+    return 0;
+}
+
+static int cli_cmd_ota(int argc, char **argv)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *next    = esp_ota_get_next_update_partition(NULL);
+    const esp_partition_t *boot    = esp_ota_get_boot_partition();
+
+    CLI_Print("\r\n=== ESP32-S3 Dual OTA Status ===\r\n");
+    if (running) {
+        CLI_Printf(" Running App Partition : %s (Offset: 0x%08X, Size: %lu KB)\r\n",
+                   running->label, running->address, (unsigned long)(running->size / 1024));
+    }
+    if (next) {
+        CLI_Printf(" Next Target Partition : %s (Offset: 0x%08X, Size: %lu KB)\r\n",
+                   next->label, next->address, (unsigned long)(next->size / 1024));
+    }
+    if (boot) {
+        CLI_Printf(" Boot Partition        : %s (Offset: 0x%08X)\r\n", boot->label, boot->address);
+    }
+    CLI_Printf(" Sketch Binary Size    : %lu bytes\r\n", (unsigned long)ESP.getSketchSize());
+    CLI_Printf(" Free Sketch Space     : %lu bytes\r\n", (unsigned long)ESP.getFreeSketchSpace());
+    CLI_Print(" Web OTA Upload URL    : http://192.168.4.1 (OTA Card)\r\n");
+    CLI_Print("================================\r\n");
+    return 0;
+}
+
 static int cli_cmd_wifi(int argc, char **argv)
 {
     if (argc < 2) {
@@ -579,6 +710,8 @@ void CLI_Init(void)
     CLI_RegisterCommand("bright",  cli_cmd_bright,  "Set LED brightness (Usage: bright 0-255)");
     CLI_RegisterCommand("psram",   cli_cmd_psram,   "8MB PSRAM test (status, alloc <MB>, free, speed)");
     CLI_RegisterCommand("mmap",    cli_cmd_mmap,    "128KB Flash MMAP NV-Storage (status, write, tag, dump)");
+    CLI_RegisterCommand("fs",      cli_cmd_fs,      "7MB LittleFS (list, cat, rm, write, sample, format)");
+    CLI_RegisterCommand("ota",     cli_cmd_ota,     "Dual OTA partition status and sketch size");
     CLI_RegisterCommand("wifi",    cli_cmd_wifi,    "Wi-Fi status, scan, connect");
     CLI_RegisterCommand("hello",   cli_cmd_hello,   "Print Hello World (Usage: hello [count])");
     CLI_RegisterCommand("reboot",  cli_cmd_reboot,  "Software reset the MCU");
