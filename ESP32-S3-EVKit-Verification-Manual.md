@@ -127,6 +127,7 @@ ESP32-S3-EVKit-Verfication/
 | **`top`** | `top` | **CPU 클럭, 칩 온도, SRAM 사용량, 8MB PSRAM 사용량, Wi-Fi RSSI 실시간 통계 출력** |
 | **`fs`** | `fs list`<br>`fs cat <file>`<br>`fs rm <file>`<br>`fs write <file> <str>`<br>`fs sample`<br>`fs format` | **7MB LittleFS 파일 시스템 관리 (파일 목록/내용출력/삭제/기록/샘플생성/포맷)** |
 | **`ota`** | `ota` 또는 `ota status` | **Dual OTA 펌웨어 상태 (현재 실행 파티션 `app0`/`app1`, 다음 타겟, 스케치 크기)** |
+| **`version`** / **`ver`** | `version` | **펌웨어 버전(v1.0.0 / v2.0.0), 빌드 일시, 실행 슬롯(app0/app1) 출력** |
 | **`psram`** | `psram status`<br>`psram alloc <MB>`<br>`psram free`<br>`psram speed` | **8MB PSRAM 제어 및 벤치마크 (메모리 동적 할당, 해제, Read/Write 전송 속도 측정)** |
 | **`mmap`** | `mmap status`<br>`mmap write <string>`<br>`mmap dump [len]`<br>`mmap erase` | **128KB Flash MMAP 비휘발성 메모리 관리 (가상주소 매핑, 영구 데이터 기록/덤프)** |
 | **`sysinfo`** | `sysinfo` | 칩셋 스펙, MAC 주소, IP 주소 및 상태 정보 출력 |
@@ -175,5 +176,28 @@ ESP32-S3-EVKit-Verfication/
     - 웹 UI에서 메모를 입력하고 플래시에 영구 저장 (전원을 껐다 켜거나 재부팅해도 보존)
     - 부팅 횟수(`boot_count`), 기록 횟수(`write_count`) 및 실시간 128KB Flash Hex Dump 뷰어 탑재
   - **🎨 원터치 컬러 피커 & 슬라이더**: 웹에서 색상을 고르면 GPIO48 LED가 즉각 반응
-  - **💻 웹 CLI 터미널**: 브라우저에서 `fs`, `ota`, `top`, `psram`, `mmap`, `help`, `wifi scan` 등을 직접 입력하고 실행 결과를 화면에서 확인
+  - **💻 웹 CLI 터미널**: 브라우저에서 `version`, `fs`, `ota`, `top`, `psram`, `mmap`, `help`, `wifi scan` 등을 직접 입력하고 실행 결과를 화면에서 확인
+
+---
+
+## 7. Dual OTA 무선 업데이트 시험 가이드
+
+프로젝트 내 `ota_binaries/` 폴더에 버전별 바이너리가 미리 빌드되어 준비되어 있습니다:
+* `ota_binaries/firmware_v1.0.0.bin` (버전 v1.0.0)
+* `ota_binaries/firmware_v2.0.0.bin` (버전 v2.0.0)
+
+### 📌 OTA 교차 업데이트 시험 절차
+1. **현재 상태 확인**:
+   - 웹(`http://192.168.4.1`) 또는 CLI에서 `version` 입력:
+     - 펌웨어: **`v1.0.0`**, 실행 슬롯: **`app0`**, 다음 타겟: **`app1`**
+2. **v2.0.0으로 무선 업데이트**:
+   - 웹 대시보드의 **[🚀 Dual OTA 무선 펌웨어 업데이트]** 카드에서:
+   - `[파일 선택]` 클릭 ➔ `ota_binaries/firmware_v2.0.0.bin` 선택
+   - `[OTA 펌웨어 업로드]` 클릭
+   - 0%~100% 프로그레스 바 완료 후 기기가 자동 재부팅됩니다.
+3. **v2.0.0 정상 구동 확인**:
+   - 웹을 새로고침하거나 CLI에서 `version` 입력:
+     - 펌웨어: **`v2.0.0`**, 실행 슬롯: **`app1`**, 다음 타겟: **`app0`** 으로 슬롯이 자동 전환된 것을 확인!
+4. **다시 v1.0.0으로 롤백 시험**:
+   - 동일한 방법으로 `ota_binaries/firmware_v1.0.0.bin`을 웹에서 업로드하면 다시 `app0`의 `v1.0.0`으로 복귀합니다.
 

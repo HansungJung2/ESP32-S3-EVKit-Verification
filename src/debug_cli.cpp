@@ -7,6 +7,7 @@
 #include "debug_cli.h"
 #include "mmap_storage.h"
 #include "fs_manager.h"
+#include "app_version.h"
 #include <esp_ota_ops.h>
 #include <string.h>
 #include <stdlib.h>
@@ -265,7 +266,10 @@ static int cli_cmd_help(int argc, char **argv)
 static int cli_cmd_sysinfo(int argc, char **argv)
 {
     (void)argc; (void)argv;
+    const esp_partition_t *running = esp_ota_get_running_partition();
     CLI_Print("\r\n=== ESP32-S3-WROOM-1 (N16R8) System Status ===\r\n");
+    CLI_Printf("  Firmware   : %s (%s %s)\r\n", APP_VERSION, APP_BUILD_DATE, APP_BUILD_TIME);
+    CLI_Printf("  Boot Slot  : %s\r\n", running ? running->label : "Unknown");
     CLI_Printf("  MCU Target : ESP32-S3 (Xtensa LX7 Dual Core)\r\n");
     CLI_Printf("  Core Clock : %lu MHz\r\n", (unsigned long)getCpuFrequencyMhz());
     CLI_Printf("  Flash      : 16MB (SPI)\r\n");
@@ -503,6 +507,7 @@ static int cli_cmd_ota(int argc, char **argv)
     const esp_partition_t *boot    = esp_ota_get_boot_partition();
 
     CLI_Print("\r\n=== ESP32-S3 Dual OTA Status ===\r\n");
+    CLI_Printf(" Firmware Version      : %s (%s %s)\r\n", APP_VERSION, APP_BUILD_DATE, APP_BUILD_TIME);
     if (running) {
         CLI_Printf(" Running App Partition : %s (Offset: 0x%08X, Size: %lu KB)\r\n",
                    running->label, running->address, (unsigned long)(running->size / 1024));
@@ -518,6 +523,24 @@ static int cli_cmd_ota(int argc, char **argv)
     CLI_Printf(" Free Sketch Space     : %lu bytes\r\n", (unsigned long)ESP.getFreeSketchSpace());
     CLI_Print(" Web OTA Upload URL    : http://192.168.4.1 (OTA Card)\r\n");
     CLI_Print("================================\r\n");
+    return 0;
+}
+
+static int cli_cmd_version(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *next    = esp_ota_get_next_update_partition(NULL);
+
+    CLI_Print("\r\n=======================================================\r\n");
+    CLI_Printf("  Firmware Version  : %s\r\n", APP_VERSION);
+    CLI_Printf("  Build Date & Time : %s %s\r\n", APP_BUILD_DATE, APP_BUILD_TIME);
+    CLI_Printf("  Running Partition : %s (0x%08X)\r\n", running ? running->label : "Unknown", running ? running->address : 0);
+    CLI_Printf("  Next Target Slot  : %s (0x%08X)\r\n", next ? next->label : "Unknown", next ? next->address : 0);
+    CLI_Printf("  Flash Size        : 16 MB (Quad/Octal)\r\n");
+    CLI_Printf("  PSRAM Size        : 8 MB (Octal OPI)\r\n");
+    CLI_Printf("  LittleFS Storage  : 7 MB\r\n");
+    CLI_Print("=======================================================\r\n");
     return 0;
 }
 
@@ -712,6 +735,8 @@ void CLI_Init(void)
     CLI_RegisterCommand("mmap",    cli_cmd_mmap,    "128KB Flash MMAP NV-Storage (status, write, tag, dump)");
     CLI_RegisterCommand("fs",      cli_cmd_fs,      "7MB LittleFS (list, cat, rm, write, sample, format)");
     CLI_RegisterCommand("ota",     cli_cmd_ota,     "Dual OTA partition status and sketch size");
+    CLI_RegisterCommand("version", cli_cmd_version, "Display firmware version and running slot");
+    CLI_RegisterCommand("ver",     cli_cmd_version, "Alias for version");
     CLI_RegisterCommand("wifi",    cli_cmd_wifi,    "Wi-Fi status, scan, connect");
     CLI_RegisterCommand("hello",   cli_cmd_hello,   "Print Hello World (Usage: hello [count])");
     CLI_RegisterCommand("reboot",  cli_cmd_reboot,  "Software reset the MCU");

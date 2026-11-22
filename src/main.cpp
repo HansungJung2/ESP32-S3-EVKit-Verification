@@ -5,6 +5,7 @@
 #include <Update.h>
 #include <ArduinoOTA.h>
 #include <esp_ota_ops.h>
+#include "app_version.h"
 #include "debug_cli.h"
 #include "mmap_storage.h"
 #include "fs_manager.h"
@@ -115,7 +116,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <body>
   <div class="card">
     <h1>ESP32-S3 EV-Kit Dashboard</h1>
-    <div class="subtitle">16MB Flash | 8MB PSRAM | 7MB LittleFS | Dual OTA</div>
+    <div class="subtitle"><span class="badge" style="color:#04d361; font-weight:bold;" id="header-version">v1.0.0</span> | 16MB Flash | 8MB PSRAM | 7MB LittleFS | Dual OTA</div>
 
     <!-- 1. Realtime Hardware Stats -->
     <div class="section-title">📊 System Memory & Storages</div>
@@ -200,7 +201,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <!-- 4. OTA Firmware Update -->
     <div class="section-title">🚀 Dual OTA 무선 펌웨어 업데이트</div>
     <div style="font-size: 11px; margin-bottom: 4px;">
-      실행 파티션: <span class="badge" id="ota-running" style="color:#04d361;">--</span> | 
+      버전: <span class="badge" id="ota-version" style="color:#04d361; font-weight:bold;">--</span> | 
+      실행 슬롯: <span class="badge" id="ota-running" style="color:#04d361;">--</span> | 
       다음 타겟: <span class="badge" id="ota-next" style="color:#1ea2df;">--</span> |
       여유 공간: <span class="badge" id="ota-free">--</span>
     </div>
@@ -368,6 +370,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       fetch('/api/ota/info')
         .then(r => r.json())
         .then(data => {
+          document.getElementById('ota-version').innerText = data.version;
+          document.getElementById('header-version').innerText = data.version;
           document.getElementById('ota-running').innerText = data.running;
           document.getElementById('ota-next').innerText = data.next;
           document.getElementById('ota-free').innerText = (data.free_space / (1024*1024)).toFixed(1) + ' MB';
@@ -719,7 +723,8 @@ void handleApiOtaInfo() {
     const esp_partition_t *next    = esp_ota_get_next_update_partition(NULL);
     char buf[256];
     snprintf(buf, sizeof(buf),
-        "{\"running\":\"%s\",\"next\":\"%s\",\"sketch_size\":%lu,\"free_space\":%lu}",
+        "{\"version\":\"%s\",\"running\":\"%s\",\"next\":\"%s\",\"sketch_size\":%lu,\"free_space\":%lu}",
+        APP_VERSION,
         running ? running->label : "unknown",
         next ? next->label : "unknown",
         (unsigned long)ESP.getSketchSize(),
@@ -927,6 +932,7 @@ void setup()
     CLI_Init();
 
     Serial.println(F("\r\n======================================================="));
+    Serial.printf( "  Firmware : %s (Built: %s %s)\r\n", APP_VERSION, APP_BUILD_DATE, APP_BUILD_TIME);
     Serial.println(F("[WIFI] Access Point Created!"));
     Serial.println(F("  SSID     : ESP32-S3-WIFI"));
     Serial.println(F("  Password : 12345678"));
