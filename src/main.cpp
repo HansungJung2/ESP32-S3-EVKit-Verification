@@ -9,6 +9,7 @@
 #include "debug_cli.h"
 #include "mmap_storage.h"
 #include "fs_manager.h"
+#include "rtc_manager.h"
 
 // ── RGB LED 설정 (WS2812B on GPIO48) ──────────────────────────
 #define LED_PIN             48
@@ -117,6 +118,22 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   <div class="card">
     <h1>ESP32-S3 EV-Kit Dashboard</h1>
     <div class="subtitle"><span class="badge" style="color:#04d361; font-weight:bold;" id="header-version">v1.0.0</span> | 16MB Flash | 8MB PSRAM | 7MB LittleFS | Dual OTA</div>
+
+    <!-- 0. Real-Time Clock (RTC) -->
+    <div class="section-title">🕒 Hardware RTC Clock (실시간 표준시)</div>
+    <div style="display:flex; justify-content:space-between; align-items:center; background:#18181b; padding:8px 10px; border-radius:8px; border:1px solid #29292e;">
+      <div>
+        <div id="rtc-time-disp" style="font-size:16px; font-weight:bold; color:#04d361; font-family:monospace;">--:--:--</div>
+        <div style="font-size:11px; color:#8d8d99;" id="rtc-date-disp">YYYY-MM-DD</div>
+      </div>
+      <div style="text-align:right;">
+        <span id="rtc-sync-badge" class="badge" style="color:#fba94c;">미동기화</span>
+      </div>
+    </div>
+    <div class="btn-group" style="margin-top:6px;">
+      <button class="btn btn-blue" onclick="syncRtcWithBrowser()">🕒 PC/폰 표준시간 동기화</button>
+      <button class="btn btn-orange" onclick="syncRtcNtp()">🌐 인터넷 NTP 동기화</button>
+    </div>
 
     <!-- 1. Realtime Hardware Stats -->
     <div class="section-title">📊 System Memory & Storages</div>
@@ -528,10 +545,58 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       plot(tempHist, '#fba94c', 80);
     }
 
+    // ── RTC Time Sync Actions ──
+    let rtcAutoSynced = false;
+
+    function syncRtcWithBrowser() {
+      const now = new Date();
+      const epoch = Math.floor(now.getTime() / 1000);
+      const tzOffsetSec = -now.getTimezoneOffset() * 60;
+      log(`[RTC] Syncing with Browser time: ${now.toLocaleString()}...`);
+      fetch(`/api/rtc/sync?epoch=${epoch}&tz=${tzOffsetSec}`, { method: 'POST' })
+        .then(r => r.text())
+        .then(t => {
+          log(t);
+          fetchStats();
+        });
+    }
+
+    function syncRtcNtp() {
+      log('[RTC] Requesting time sync from NTP servers...');
+      fetch('/api/rtc/ntp', { method: 'POST' })
+        .then(r => r.text())
+        .then(t => {
+          log(t);
+          fetchStats();
+        });
+    }
+
     function fetchStats() {
       fetch('/api/stats')
         .then(r => r.json())
         .then(data => {
+          if (data.rtc_time) {
+            const parts = data.rtc_time.split(' ');
+            if (parts.length >= 2) {
+              document.getElementById('rtc-date-disp').innerText = parts[0];
+              document.getElementById('rtc-time-disp').innerText = parts[1] + ' KST';
+            } else {
+              document.getElementById('rtc-time-disp').innerText = data.rtc_time;
+            }
+          }
+          const rtcBadge = document.getElementById('rtc-sync-badge');
+          if (data.rtc_synced) {
+            rtcBadge.innerText = '✅ 동기화됨';
+            rtcBadge.style.color = '#04d361';
+          } else {
+            rtcBadge.innerText = '⚠️ 미동기화';
+            rtcBadge.style.color = '#fba94c';
+            if (!rtcAutoSynced) {
+              rtcAutoSynced = true;
+              syncRtcWithBrowser();
+            }
+          }
+
           const totalMB = (data.flash_total / (1024*1024)).toFixed(0);
           const appMB   = (data.flash_app / (1024*1024)).toFixed(2);
           document.getElementById('flash-text').innerText = `${appMB} / ${totalMB} MB`;
@@ -594,18 +659,51 @@ void handleApiStats() {
     int rssi = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : 0;
     uint32_t uptimeSec = millis() / 1000;
 
-    char json[384];
+    char json[448];
     snprintf(json, sizeof(json),
         "{\"heap_total\":%lu,\"heap_used\":%lu,\"heap_pct\":%.1f,"
         "\"psram_total\":%lu,\"psram_used\":%lu,\"psram_pct\":%.1f,"
         "\"flash_total\":%lu,\"flash_app\":%lu,\"flash_pct\":%.1f,"
-        "\"temp\":%.1f,\"rssi\":%d,\"uptime\":%lu}",
+        "\"temp\":%.1f,\"rssi\":%d,\"uptime\":%lu,"
+        "\"rtc_time\":\"%s\",\"rtc_synced\":%s}",
         (unsigned long)totalHeap, (unsigned long)usedHeap, heapPct,
         (unsigned long)totalPsram, (unsigned long)usedPsram, psramPct,
         (unsigned long)totalFlash, (unsigned long)appFlash, flashPct,
-        tempC, rssi, (unsigned long)uptimeSec);
+        tempC, rssi, (unsigned long)uptimeSec,
+        RTC_GetTimeString().c_str(),
+        RTC_IsSynced() ? "true" : "false");
 
     server.send(200, "application/json", json);
+}
+
+// ── RTC Web Handlers ──────────────────────────────────────────
+void handleApiRtcGet() {
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+        "{\"time\":\"%s\",\"epoch\":%ld,\"synced\":%s}",
+        RTC_GetTimeString().c_str(),
+        (long)RTC_GetEpoch(),
+        RTC_IsSynced() ? "true" : "false");
+    server.send(200, "application/json", buf);
+}
+
+void handleApiRtcSync() {
+    if (server.hasArg("epoch")) {
+        time_t ep = (time_t)server.arg("epoch").toInt();
+        int tz = server.hasArg("tz") ? server.arg("tz").toInt() : (9 * 3600);
+        RTC_SetEpoch(ep, tz);
+        server.send(200, "text/plain", String("[RTC] Time synced: ") + RTC_GetTimeString() + " KST");
+    } else {
+        server.send(400, "text/plain", "Missing epoch arg");
+    }
+}
+
+void handleApiRtcNtp() {
+    if (RTC_SyncNTP()) {
+        server.send(200, "text/plain", String("[RTC] NTP sync successful: ") + RTC_GetTimeString() + " KST");
+    } else {
+        server.send(500, "text/plain", "[RTC] NTP sync failed! Connect to Wi-Fi station with internet first.");
+    }
 }
 
 // ── LittleFS Web Handlers ─────────────────────────────────────
@@ -886,6 +984,9 @@ void setup()
     // ── 7MB LittleFS 파일 시스템 초기화 ─────────────────────────
     FS_Init();
 
+    // ── Hardware RTC 초기화 (KST 타임존) ────────────────────────
+    RTC_Init();
+
     // ── Wi-Fi SoftAP (자체 공유기 모드) 시작 ───────────────────
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP("ESP32-S3-WIFI", "12345678");
@@ -911,6 +1012,11 @@ void setup()
     server.on("/api/ota/info", HTTP_GET, handleApiOtaInfo);
     server.on("/api/ota/upload", HTTP_POST, handleApiOtaUpload, handleApiOtaUploadProcess);
 
+    // RTC Routes
+    server.on("/api/rtc/get", HTTP_GET, handleApiRtcGet);
+    server.on("/api/rtc/sync", HTTP_POST, handleApiRtcSync);
+    server.on("/api/rtc/ntp", HTTP_POST, handleApiRtcNtp);
+
     // MMAP Routes
     server.on("/api/mmap/get", handleApiMmapGet);
     server.on("/api/mmap/set", handleApiMmapSet);
@@ -933,6 +1039,7 @@ void setup()
 
     Serial.println(F("\r\n======================================================="));
     Serial.printf( "  Firmware : %s (Built: %s %s)\r\n", APP_VERSION, APP_BUILD_DATE, APP_BUILD_TIME);
+    Serial.printf( "  RTC Time : %s KST\r\n", RTC_GetTimeString().c_str());
     Serial.println(F("[WIFI] Access Point Created!"));
     Serial.println(F("  SSID     : ESP32-S3-WIFI"));
     Serial.println(F("  Password : 12345678"));

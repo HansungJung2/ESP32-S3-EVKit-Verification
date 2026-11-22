@@ -8,6 +8,7 @@
 #include "mmap_storage.h"
 #include "fs_manager.h"
 #include "app_version.h"
+#include "rtc_manager.h"
 #include <esp_ota_ops.h>
 #include <string.h>
 #include <stdlib.h>
@@ -270,6 +271,7 @@ static int cli_cmd_sysinfo(int argc, char **argv)
     CLI_Print("\r\n=== ESP32-S3-WROOM-1 (N16R8) System Status ===\r\n");
     CLI_Printf("  Firmware   : %s (%s %s)\r\n", APP_VERSION, APP_BUILD_DATE, APP_BUILD_TIME);
     CLI_Printf("  Boot Slot  : %s\r\n", running ? running->label : "Unknown");
+    CLI_Printf("  RTC Time   : %s KST (%s)\r\n", RTC_GetTimeString().c_str(), RTC_IsSynced() ? "SYNCED" : "UNSYNCED");
     CLI_Printf("  MCU Target : ESP32-S3 (Xtensa LX7 Dual Core)\r\n");
     CLI_Printf("  Core Clock : %lu MHz\r\n", (unsigned long)getCpuFrequencyMhz());
     CLI_Printf("  Flash      : 16MB (SPI)\r\n");
@@ -544,6 +546,46 @@ static int cli_cmd_version(int argc, char **argv)
     return 0;
 }
 
+static int cli_cmd_time(int argc, char **argv)
+{
+    if (argc >= 2) {
+        if (strcmp(argv[1], "ntp") == 0) {
+            CLI_Print("[RTC] Requesting time from NTP servers...\r\n");
+            if (RTC_SyncNTP()) {
+                CLI_Printf("[RTC] NTP Sync Success! Time: %s KST\r\n", RTC_GetTimeString().c_str());
+            } else {
+                CLI_Print("[RTC] NTP Sync Failed! (Ensure Wi-Fi Station is connected to Internet)\r\n");
+                return -1;
+            }
+            return 0;
+        } else if (strcmp(argv[1], "set") == 0) {
+            if (argc < 4) {
+                CLI_Print("Usage: time set <YYYY-MM-DD> <HH:MM:SS>\r\n");
+                CLI_Print("  ex)  time set 2026-11-22 15:45:00\r\n");
+                return -1;
+            }
+            int year, mon, mday, hour, min, sec;
+            if (sscanf(argv[2], "%d-%d-%d", &year, &mon, &mday) == 3 &&
+                sscanf(argv[3], "%d:%d:%d", &hour, &min, &sec) == 3) {
+                if (RTC_SetManualTime(year, mon, mday, hour, min, sec)) {
+                    CLI_Printf("[RTC] Time manually updated: %s KST\r\n", RTC_GetTimeString().c_str());
+                    return 0;
+                }
+            }
+            CLI_Print("[RTC] Invalid date/time format! Use: YYYY-MM-DD HH:MM:SS\r\n");
+            return -1;
+        }
+    }
+
+    CLI_Print("\r\n=== ESP32-S3 Hardware RTC Clock ===\r\n");
+    CLI_Printf("  Current Time  : %s KST\r\n", RTC_GetTimeString().c_str());
+    CLI_Printf("  Unix Epoch    : %ld\r\n", (long)RTC_GetEpoch());
+    CLI_Printf("  Sync Status   : %s\r\n", RTC_IsSynced() ? "SYNCED" : "UNSYNCED (Using default clock)");
+    CLI_Print("  Options       : time ntp | time set YYYY-MM-DD HH:MM:SS\r\n");
+    CLI_Print("===================================\r\n");
+    return 0;
+}
+
 static int cli_cmd_wifi(int argc, char **argv)
 {
     if (argc < 2) {
@@ -737,6 +779,8 @@ void CLI_Init(void)
     CLI_RegisterCommand("ota",     cli_cmd_ota,     "Dual OTA partition status and sketch size");
     CLI_RegisterCommand("version", cli_cmd_version, "Display firmware version and running slot");
     CLI_RegisterCommand("ver",     cli_cmd_version, "Alias for version");
+    CLI_RegisterCommand("time",    cli_cmd_time,    "Hardware RTC time (status, ntp, set)");
+    CLI_RegisterCommand("rtc",     cli_cmd_time,    "Alias for time");
     CLI_RegisterCommand("wifi",    cli_cmd_wifi,    "Wi-Fi status, scan, connect");
     CLI_RegisterCommand("hello",   cli_cmd_hello,   "Print Hello World (Usage: hello [count])");
     CLI_RegisterCommand("reboot",  cli_cmd_reboot,  "Software reset the MCU");
