@@ -10,6 +10,7 @@
  */
 
 #include <zephyr/kernel.h>
+#include <zephyr/version.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/reboot.h>
 #include <zephyr/drivers/gpio.h>
@@ -36,8 +37,8 @@ static void heartbeat_thread_entry(void *p1, void *p2, void *p3)
     while (1) {
         k_sleep(K_MSEC(1000));
         count++;
-        int64_t uptime_ms = k_uptime_get();
-        LOG_DBG("Heartbeat #%u (Uptime: %lld ms)", count, uptime_ms);
+        uint32_t uptime_sec = (uint32_t)(k_uptime_get() / 1000);
+        LOG_DBG("Heartbeat #%u (Uptime: %u sec)", count, uptime_sec);
     }
 }
 
@@ -83,12 +84,13 @@ static int cmd_sysinfo(const struct shell *sh, size_t argc, char **argv)
     ARG_UNUSED(argc);
     ARG_UNUSED(argv);
 
+    uint32_t uptime_sec = (uint32_t)(k_uptime_get() / 1000);
     shell_print(sh, "================ ESP32-S3 Zephyr RTOS ================");
     shell_print(sh, "  Kernel Version : %s", KERNEL_VERSION_STRING);
     shell_print(sh, "  Architecture   : Xtensa (ESP32-S3 Dual-Core LX7)");
-    shell_print(sh, "  Board Target   : %s", CONFIG_BOARD);
+    shell_print(sh, "  Board Target   : %s", CONFIG_BOARD_TARGET);
     shell_print(sh, "  CPU Frequency  : %d MHz", CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC / 1000000);
-    shell_print(sh, "  System Uptime  : %lld sec", k_uptime_get() / 1000);
+    shell_print(sh, "  System Uptime  : %u sec", uptime_sec);
     shell_print(sh, "  Cycles         : %u", k_cycle_get_32());
     shell_print(sh, "======================================================");
     return 0;
@@ -151,7 +153,7 @@ int main(void)
 {
     LOG_INF("==================================================");
     LOG_INF("   ESP32-S3 Zephyr RTOS Verification Firmware    ");
-    LOG_INF("   Kernel: %s | Board: %s", KERNEL_VERSION_STRING, CONFIG_BOARD);
+    LOG_INF("   Kernel: %s | Board: %s", KERNEL_VERSION_STRING, CONFIG_BOARD_TARGET);
     LOG_INF("==================================================");
 
     LOG_INF("Zephyr Kernel initialized successfully!");
