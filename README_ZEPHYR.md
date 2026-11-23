@@ -6,6 +6,7 @@
 
 ## 1. 프로젝트 주요 기능
 
+* **기능 지원 및 마이그레이션 가이드**: [ZEPHYR_FEATURE_SUPPORT_GUIDE.md](file:///d:/00. Code/AI분석/ESP32-S3-EVKit-Verification/ZEPHYR_FEATURE_SUPPORT_GUIDE.md) (Web Server, BLE, Wi-Fi, LED, MMAP, OTA 상세 비교)
 * **Zephyr Kernel 멀티스레딩**
   * `heartbeat_thread`: 1초 주기로 시스템 런타임 상태 모니터링
   * `worker_thread`: `k_msgq` 메시지 큐를 통한 비동기 이벤트 처리
