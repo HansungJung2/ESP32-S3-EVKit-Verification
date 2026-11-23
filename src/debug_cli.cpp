@@ -586,6 +586,49 @@ static int cli_cmd_time(int argc, char **argv)
     return 0;
 }
 
+static volatile uint8_t s_last_wifi_disc_reason = 0;
+
+static const char* wifi_auth_str(wifi_auth_mode_t auth)
+{
+    switch (auth) {
+        case WIFI_AUTH_OPEN:            return "OPEN";
+        case WIFI_AUTH_WEP:             return "WEP";
+        case WIFI_AUTH_WPA_PSK:         return "WPA-PSK";
+        case WIFI_AUTH_WPA2_PSK:        return "WPA2-PSK";
+        case WIFI_AUTH_WPA_WPA2_PSK:    return "WPA/WPA2-PSK";
+        case WIFI_AUTH_WPA2_ENTERPRISE: return "WPA2-Enterprise(802.1X)";
+        case WIFI_AUTH_WPA3_PSK:        return "WPA3-SAE";
+        case WIFI_AUTH_WPA2_WPA3_PSK:   return "WPA2/WPA3-Personal";
+        case WIFI_AUTH_WAPI_PSK:        return "WAPI-PSK";
+        case WIFI_AUTH_OWE:             return "OWE";
+        default:                        return "UNKNOWN";
+    }
+}
+
+static const char* wifi_reason_str(uint8_t reason)
+{
+    switch (reason) {
+        case 1:   return "UNSPECIFIED";
+        case 2:   return "AUTH_EXPIRE";
+        case 3:   return "AUTH_LEAVE";
+        case 4:   return "ASSOC_EXPIRE";
+        case 5:   return "ASSOC_TOOMANY";
+        case 6:   return "NOT_AUTHED";
+        case 7:   return "NOT_ASSOCED";
+        case 8:   return "ASSOC_LEAVE";
+        case 9:   return "ASSOC_NOT_AUTHED";
+        case 15:  return "4WAY_HANDSHAKE_TIMEOUT (Wrong Password / PSK mismatch)";
+        case 201: return "NO_AP_FOUND";
+        case 202: return "AUTH_FAIL (Wrong Password / Auth Rejected)";
+        case 203: return "ASSOC_FAIL (Association Failed / MAC Filter or Security Mismatch)";
+        case 204: return "HANDSHAKE_TIMEOUT";
+        case 205: return "CONNECTION_FAIL";
+        case 210: return "NO_AP_FOUND_W_COMPATIBLE_SECURITY";
+        case 211: return "NO_AP_FOUND_IN_AUTHMODE_THRESHOLD (AP security lower than threshold)";
+        default:  return "REASON_CODE";
+    }
+}
+
 static int cli_cmd_wifi(int argc, char **argv)
 {
     if (argc < 2) {
@@ -611,7 +654,9 @@ static int cli_cmd_wifi(int argc, char **argv)
         } else {
             CLI_Printf("  Found %d networks:\r\n", n);
             for (int i = 0; i < n; ++i) {
-                CLI_Printf("  [%2d] %-20s (RSSI: %2d dBm)\r\n", i + 1, WiFi.SSID(i).c_str(), WiFi.RSSI(i));
+                CLI_Printf("  [%2d] CH:%2d RSSI:%3d dBm  %-22s [%s]\r\n",
+                           i + 1, WiFi.channel(i), WiFi.RSSI(i),
+                           WiFi.SSID(i).c_str(), wifi_auth_str(WiFi.encryptionType(i)));
             }
         }
     } else if (strcmp(argv[1], "connect") == 0) {
@@ -619,9 +664,15 @@ static int cli_cmd_wifi(int argc, char **argv)
             CLI_Print("Usage: wifi connect <SSID> <PASSWORD>\r\n");
             return -1;
         }
-        CLI_Printf("[WIFI] Connecting to '%s'...\r\n", argv[2]);
+        s_last_wifi_disc_reason = 0;
+        WiFi.disconnect(false);
+        delay(100);
+        // WPA1(TKIP) 레거시 네트워크 허용을 위해 임계값을 WIFI_AUTH_WPA_PSK로 명시적 설정
+        // (0/OPEN으로 두면 비밀번호 8자리 이상일 때 ESP-IDF가 강제로 WPA2로 승격하여 WPA1 연결 차단됨)
+        WiFi.setMinSecurity(WIFI_AUTH_WPA_PSK);
+        CLI_Printf("[WIFI] Connecting to '%s' (MinSecurity: WPA_PSK)...\r\n", argv[2]);
         WiFi.begin(argv[2], argv[3]);
-        int timeout = 20;
+        int timeout = 30;
         while (WiFi.status() != WL_CONNECTED && timeout > 0) {
             delay(500);
             CLI_Print(".");
@@ -630,7 +681,10 @@ static int cli_cmd_wifi(int argc, char **argv)
         if (WiFi.status() == WL_CONNECTED) {
             CLI_Printf("\r\n[WIFI] Connected! Web Dashboard IP: http://%s\r\n", WiFi.localIP().toString().c_str());
         } else {
-            CLI_Print("\r\n[WIFI] Connection failed!\r\n");
+            CLI_Printf("\r\n[WIFI] Connection failed! (Status: %d, Disconnect Reason: %d - %s)\r\n",
+                       (int)WiFi.status(),
+                       (int)s_last_wifi_disc_reason,
+                       wifi_reason_str(s_last_wifi_disc_reason));
         }
     } else {
         CLI_Printf("Unknown option: '%s'\r\n", argv[1]);
@@ -784,6 +838,12 @@ void CLI_Init(void)
     CLI_RegisterCommand("wifi",    cli_cmd_wifi,    "Wi-Fi status, scan, connect");
     CLI_RegisterCommand("hello",   cli_cmd_hello,   "Print Hello World (Usage: hello [count])");
     CLI_RegisterCommand("reboot",  cli_cmd_reboot,  "Software reset the MCU");
+
+    WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+        if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+            s_last_wifi_disc_reason = info.wifi_sta_disconnected.reason;
+        }
+    });
 
     /* ── BLE Nordic UART Service Setup ── */
     BLEDevice::init(BLE_DEVICE_NAME);
