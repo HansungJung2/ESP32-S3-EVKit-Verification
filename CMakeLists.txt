@@ -9,4 +9,5 @@ project(esp32s3_zephyr_verification)
 
 target_sources(app PRIVATE
     src/main.c
+    src/mmap_storage.c
 )
