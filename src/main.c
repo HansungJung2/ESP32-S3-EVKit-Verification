@@ -246,6 +246,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 {
     if (err) {
         LOG_ERR("BLE Connection failed (err %u)", err);
+        bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
         return;
     }
     LOG_INF("BLE Client Connected!");
@@ -258,6 +259,12 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     if (current_conn) {
         bt_conn_unref(current_conn);
         current_conn = NULL;
+    }
+    int err = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+    if (err) {
+        LOG_ERR("Failed to restart BLE advertising: %d", err);
+    } else {
+        LOG_INF("BLE Advertising restarted successfully.");
     }
 }
 
