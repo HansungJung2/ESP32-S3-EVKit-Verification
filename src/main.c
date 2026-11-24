@@ -23,14 +23,14 @@
 #include <zephyr/debug/thread_analyzer.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/storage/flash_map.h>
-#include <zephyr/dfu/mcuboot.h>
-#include <zephyr/dfu/flash_img.h>
+#include <esp_flash.h>
 
 /* Networking & Sockets */
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_core.h>
 #include <zephyr/net/net_mgmt.h>
 #include <zephyr/net/wifi_mgmt.h>
+#include <zephyr/net/dhcpv4.h>
 #include <zephyr/net/socket.h>
 
 /* Bluetooth BLE & NUS */
@@ -110,11 +110,11 @@ static struct bt_conn *current_conn;
 
 static const struct bt_data ad[] = {
     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-    BT_DATA(BT_DATA_NAME_COMPLETE, "ESP32-S3-Zephyr", 15),
+    BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_NUS_SRV_VAL),
 };
 
 static const struct bt_data sd[] = {
-    BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_NUS_SRV_VAL),
+    BT_DATA(BT_DATA_NAME_COMPLETE, "ESP32-S3-Zephyr", 15),
 };
 
 static void nus_notif_enabled(bool enabled, void *ctx)
@@ -181,7 +181,7 @@ static void init_bluetooth(void)
         return;
     }
 
-    err = bt_le_adv_start(BT_LE_ADV_CONN_NAME, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
+    err = bt_le_adv_start(BT_LE_ADV_CONN, ad, ARRAY_SIZE(ad), sd, ARRAY_SIZE(sd));
     if (err) {
         LOG_ERR("BLE advertising failed to start: %d", err);
         return;
@@ -192,6 +192,7 @@ static void init_bluetooth(void)
 
 /* ── 3. Wi-Fi DHCP Event Management ──────────────────────────────── */
 static struct net_mgmt_event_callback mgmt_cb;
+static struct net_mgmt_event_callback wifi_conn_cb;
 static char s_assigned_ip[32] = "Not Connected";
 static bool s_has_ip = false;
 
@@ -212,11 +213,27 @@ static void net_event_handler(struct net_mgmt_event_callback *cb,
     }
 }
 
+static void wifi_conn_handler(struct net_mgmt_event_callback *cb,
+                             uint32_t mgmt_event, struct net_if *iface)
+{
+    if (mgmt_event == NET_EVENT_WIFI_CMD_CONNECT_RESULT) {
+        const struct wifi_status *status = (const struct wifi_status *)cb->info;
+        if (status && status->status == 0) {
+            LOG_INF("[Wi-Fi] Connected to AP! Requesting DHCP IP...");
+            net_dhcpv4_start(iface ? iface : net_if_get_default());
+        }
+    }
+}
+
 static void init_wifi_events(void)
 {
     net_mgmt_init_event_callback(&mgmt_cb, net_event_handler,
                                  NET_EVENT_IPV4_DHCP_BOUND);
     net_mgmt_add_event_callback(&mgmt_cb);
+
+    net_mgmt_init_event_callback(&wifi_conn_cb, wifi_conn_handler,
+                                 NET_EVENT_WIFI_CMD_CONNECT_RESULT);
+    net_mgmt_add_event_callback(&wifi_conn_cb);
 }
 
 /* ── 4. Embedded HTTP Web Server (Port 80) ────────────────────────── */
@@ -472,60 +489,48 @@ static void http_server_thread_entry(void *p1, void *p2, void *p3)
                 zsock_send(client_fd, hdr, hlen, 0);
                 zsock_send(client_fd, dump_buf, strlen(dump_buf), 0);
             }
-            /* API: OTA Firmware Upload */
+            /* API: OTA Firmware / File Upload to Flash */
             else if (strstr(rx_buffer, "POST /api/ota/upload") != NULL ||
                      strstr(rx_buffer, "POST /api/fs/upload") != NULL) {
-                /* Find Content-Length */
                 char *cl_str = strstr(rx_buffer, "Content-Length: ");
-                int content_len = 0;
-                if (cl_str) {
-                    content_len = atoi(cl_str + 16);
+                int content_len = cl_str ? atoi(cl_str + 16) : 0;
+
+                LOG_INF("[OTA] Receiving firmware upload (%d bytes)", content_len);
+
+                /* Erase Secondary Flash Slot (Slot 1 @ 0x00110000, 1MB max) */
+                uint32_t target_addr = 0x00110000;
+                uint32_t erase_len = ((content_len + 4095) / 4096) * 4096;
+                if (erase_len < 65536) erase_len = 65536;
+                esp_flash_erase_region(NULL, target_addr, erase_len);
+
+                char *body = strstr(rx_buffer, "\r\n\r\n");
+                int total_written = 0;
+                if (body) {
+                    body += 4;
+                    int header_len = (int)(body - rx_buffer);
+                    int body_in_buf = received - header_len;
+                    if (body_in_buf > 0) {
+                        esp_flash_write(NULL, body, target_addr + total_written, body_in_buf);
+                        total_written += body_in_buf;
+                    }
                 }
 
-                LOG_INF("[OTA] Receiving firmware upload (Expected: %d bytes)", content_len);
-
-                /* Initialize flash image writer to Slot 1 */
-                struct flash_img_context img_ctx;
-                int err = flash_img_init(&img_ctx);
-                if (err) {
-                    LOG_ERR("flash_img_init_id failed: %d", err);
-                    const char fail_resp[] = "HTTP/1.1 500 Error\r\n\r\nFlash Image Init Failed";
-                    zsock_send(client_fd, fail_resp, sizeof(fail_resp) - 1, 0);
-                } else {
-                    /* Locate body after \r\n\r\n */
-                    char *body = strstr(rx_buffer, "\r\n\r\n");
-                    int total_written = 0;
-                    if (body) {
-                        body += 4;
-                        int header_len = (int)(body - rx_buffer);
-                        int body_in_buf = received - header_len;
-                        if (body_in_buf > 0) {
-                            flash_img_buffered_write(&img_ctx, (uint8_t *)body, body_in_buf, false);
-                            total_written += body_in_buf;
-                        }
-                    }
-
-                    /* Read remaining chunks from socket */
-                    while (total_written < content_len) {
-                        int r = zsock_recv(client_fd, rx_buffer, sizeof(rx_buffer), 0);
-                        if (r <= 0) break;
-                        flash_img_buffered_write(&img_ctx, (uint8_t *)rx_buffer, r, false);
-                        total_written += r;
-                    }
-                    /* Flush remaining bytes */
-                    flash_img_buffered_write(&img_ctx, NULL, 0, true);
-
-                    LOG_INF("[OTA] Received %d bytes. Requesting MCUboot upgrade...", total_written);
-                    boot_request_upgrade(BOOT_UPGRADE_TEST);
-
-                    const char ok_resp[] = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nOTA_SUCCESS";
-                    zsock_send(client_fd, ok_resp, sizeof(ok_resp) - 1, 0);
-                    zsock_close(client_fd);
-
-                    k_sleep(K_MSEC(1500));
-                    sys_reboot(SYS_REBOOT_COLD);
-                    continue;
+                while (total_written < content_len) {
+                    int r = zsock_recv(client_fd, rx_buffer, sizeof(rx_buffer), 0);
+                    if (r <= 0) break;
+                    esp_flash_write(NULL, rx_buffer, target_addr + total_written, r);
+                    total_written += r;
                 }
+
+                LOG_INF("[OTA] Wrote %d bytes to Secondary Slot (0x%08X)", total_written, target_addr);
+
+                const char ok_resp[] = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nOTA_SUCCESS";
+                zsock_send(client_fd, ok_resp, sizeof(ok_resp) - 1, 0);
+                zsock_close(client_fd);
+
+                k_sleep(K_MSEC(1500));
+                sys_reboot(SYS_REBOOT_COLD);
+                continue;
             }
             /* API: Reboot */
             else if (strstr(rx_buffer, "GET /api/reboot") != NULL) {
