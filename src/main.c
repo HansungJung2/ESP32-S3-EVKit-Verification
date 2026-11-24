@@ -325,6 +325,8 @@ static void wifi_conn_handler(struct net_mgmt_event_callback *cb,
         if (status && status->status == 0) {
             LOG_INF("[Wi-Fi] Connected to AP! Requesting DHCP IP...");
             net_dhcpv4_start(iface ? iface : net_if_get_default());
+        } else {
+            LOG_WRN("[Wi-Fi] Connect attempt failed (status %d)", status ? status->status : -1);
         }
     }
 }
@@ -907,8 +909,41 @@ static int cmd_reboot(const struct shell *sh, size_t argc, char **argv)
     return 0;
 }
 
+static int cmd_app_wifi(const struct shell *sh, size_t argc, char **argv)
+{
+    if (argc < 2) {
+        shell_print(sh, "Usage: app wifi <scan | connect <ssid> [password] | status | disconnect>");
+        return -1;
+    }
+
+    if (strcmp(argv[1], "scan") == 0) {
+        return shell_execute_cmd(sh, "wifi scan");
+    } else if (strcmp(argv[1], "connect") == 0) {
+        if (argc < 3) {
+            shell_print(sh, "Usage: app wifi connect <ssid> [password]");
+            return -1;
+        }
+        char cmd_buf[192];
+        if (argc >= 4) {
+            /* -k 1: WPA2-PSK Personal */
+            snprintf(cmd_buf, sizeof(cmd_buf), "wifi connect -s \"%s\" -p \"%s\" -k 1", argv[2], argv[3]);
+        } else {
+            snprintf(cmd_buf, sizeof(cmd_buf), "wifi connect -s \"%s\" -k 0", argv[2]);
+        }
+        shell_print(sh, "[Wi-Fi] Connecting to '%s'...", argv[2]);
+        return shell_execute_cmd(sh, cmd_buf);
+    } else if (strcmp(argv[1], "status") == 0) {
+        return shell_execute_cmd(sh, "wifi status");
+    } else if (strcmp(argv[1], "disconnect") == 0) {
+        return shell_execute_cmd(sh, "wifi disconnect");
+    }
+    shell_error(sh, "Unknown wifi sub-command '%s'", argv[1]);
+    return -1;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_app,
     SHELL_CMD(sysinfo, NULL, "Show ESP32-S3 Zephyr system info", cmd_sysinfo),
+    SHELL_CMD(wifi,    NULL, "Wi-Fi control (app wifi connect <ssid> [pass] | scan)", cmd_app_wifi),
     SHELL_CMD(mmap,    NULL, "MMAP storage (app mmap info|memo|dump)", cmd_mmap),
     SHELL_CMD(led,     NULL, "Set WS2812 LED color (app led <r> <g> <b>)", cmd_led),
     SHELL_CMD(rgb,     NULL, "Set LED mode (app rgb <rainbow|pulse|off>)", cmd_rgb),
