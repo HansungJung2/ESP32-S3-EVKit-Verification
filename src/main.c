@@ -106,6 +106,8 @@ static void hsv_to_rgb(uint16_t h, uint8_t s, uint8_t v, uint8_t *r, uint8_t *g,
 }
 
 /* ── 2. Bluetooth BLE & Nordic UART Service (NUS) ─────────────────── */
+static char s_assigned_ip[32] = "Not Connected";
+static bool s_has_ip = false;
 static struct bt_conn *current_conn;
 
 static const struct bt_data ad[] = {
@@ -123,6 +125,19 @@ static void nus_notif_enabled(bool enabled, void *ctx)
     LOG_INF("[BLE NUS] Notification state changed: %s", enabled ? "ENABLED" : "DISABLED");
 }
 
+static void nus_send_response(struct bt_conn *conn, const char *str)
+{
+    if (!conn) return;
+    size_t len = strlen(str);
+    size_t offset = 0;
+    while (offset < len) {
+        size_t chunk = MIN(len - offset, 20);
+        bt_nus_send(conn, str + offset, chunk);
+        offset += chunk;
+        k_msleep(10);
+    }
+}
+
 static void nus_received(struct bt_conn *conn, const void *data, uint16_t len, void *ctx)
 {
     ARG_UNUSED(ctx);
@@ -131,11 +146,95 @@ static void nus_received(struct bt_conn *conn, const void *data, uint16_t len, v
     memcpy(rx_buf, data, copy_len);
     rx_buf[copy_len] = '\0';
 
-    LOG_INF("[BLE NUS RX] %s", rx_buf);
+    while (copy_len > 0 && (rx_buf[copy_len - 1] == '\r' || rx_buf[copy_len - 1] == '\n' || rx_buf[copy_len - 1] == ' ')) {
+        rx_buf[--copy_len] = '\0';
+    }
 
-    char tx_buf[160];
-    int tx_len = snprintf(tx_buf, sizeof(tx_buf), "[Zephyr-S3] Echo: %s\r\n", rx_buf);
-    bt_nus_send(conn, tx_buf, tx_len);
+    LOG_INF("[BLE NUS RX] '%s'", rx_buf);
+
+    if (strcmp(rx_buf, "help") == 0) {
+        nus_send_response(conn,
+            "\r\n================ BLE NUS CLI ================\r\n"
+            " sysinfo            : Show board status\r\n"
+            " mmap info          : Read 128KB Flash MMAP\r\n"
+            " mmap memo <text>   : Save memo to Flash\r\n"
+            " led <r> <g> <b>    : Set WS2812 RGB (0-255)\r\n"
+            " rgb <rainbow|pulse|off> : Animation mode\r\n"
+            " reboot             : Cold reset ESP32-S3\r\n"
+            "=============================================\r\n");
+    } else if (strcmp(rx_buf, "sysinfo") == 0 || strcmp(rx_buf, "app sysinfo") == 0) {
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+            "\r\n[Zephyr-S3 System Info]\r\n"
+            " Kernel : %s\r\n"
+            " Uptime : %u sec\r\n"
+            " Wi-Fi  : %s\r\n"
+            " LED    : Mode %d\r\n"
+            " MMAP   : Phys 0x%08X (128KB)\r\n",
+            KERNEL_VERSION_STRING,
+            (uint32_t)(k_uptime_get() / 1000),
+            s_assigned_ip,
+            s_led_mode,
+            mmap_storage_get_phys_addr());
+        nus_send_response(conn, buf);
+    } else if (strcmp(rx_buf, "mmap info") == 0 || strcmp(rx_buf, "mmap") == 0) {
+        const mmap_nv_header_t *hdr = mmap_storage_get_header();
+        char buf[256];
+        if (hdr) {
+            snprintf(buf, sizeof(buf),
+                "\r\n[128KB Flash MMAP Storage]\r\n"
+                " Boot Count  : %u\r\n"
+                " Write Count : %u\r\n"
+                " Device Tag  : %s\r\n"
+                " User Memo   : %s\r\n",
+                hdr->boot_count, hdr->write_count, hdr->device_tag, hdr->user_memo);
+        } else {
+            snprintf(buf, sizeof(buf), "\r\n[MMAP Error] Storage not initialized\r\n");
+        }
+        nus_send_response(conn, buf);
+    } else if (strncmp(rx_buf, "mmap memo ", 10) == 0) {
+        const char *memo = rx_buf + 10;
+        if (mmap_storage_save_memo(memo)) {
+            char buf[160];
+            snprintf(buf, sizeof(buf), "\r\n[MMAP OK] Saved memo: '%s'\r\n", memo);
+            nus_send_response(conn, buf);
+        } else {
+            nus_send_response(conn, "\r\n[MMAP ERR] Save failed!\r\n");
+        }
+    } else if (strncmp(rx_buf, "led ", 4) == 0) {
+        char *endp;
+        int r = (int)strtol(rx_buf + 4, &endp, 10);
+        int g = (int)strtol(endp, &endp, 10);
+        int b = (int)strtol(endp, NULL, 10);
+        s_led_mode = LED_MODE_SOLID;
+        app_set_led_color((uint8_t)r, (uint8_t)g, (uint8_t)b);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "\r\n[LED OK] Color R:%d G:%d B:%d\r\n", r, g, b);
+        nus_send_response(conn, buf);
+    } else if (strncmp(rx_buf, "rgb ", 4) == 0) {
+        const char *mode = rx_buf + 4;
+        if (strcmp(mode, "rainbow") == 0) {
+            s_led_mode = LED_MODE_RAINBOW;
+            nus_send_response(conn, "\r\n[LED] Rainbow mode activated\r\n");
+        } else if (strcmp(mode, "pulse") == 0) {
+            s_led_mode = LED_MODE_PULSE;
+            nus_send_response(conn, "\r\n[LED] Pulse mode activated\r\n");
+        } else if (strcmp(mode, "off") == 0) {
+            s_led_mode = LED_MODE_OFF;
+            app_set_led_color(0, 0, 0);
+            nus_send_response(conn, "\r\n[LED] Off\r\n");
+        } else {
+            nus_send_response(conn, "\r\nUsage: rgb <rainbow|pulse|off>\r\n");
+        }
+    } else if (strcmp(rx_buf, "reboot") == 0) {
+        nus_send_response(conn, "\r\n[Rebooting ESP32-S3...]\r\n");
+        k_msleep(500);
+        sys_reboot(SYS_REBOOT_COLD);
+    } else {
+        char tx_buf[160];
+        snprintf(tx_buf, sizeof(tx_buf), "\r\n[Echo] %s (Type 'help' for commands)\r\n", rx_buf);
+        nus_send_response(conn, tx_buf);
+    }
 }
 
 static struct bt_nus_cb nus_listener = {
@@ -193,8 +292,6 @@ static void init_bluetooth(void)
 /* ── 3. Wi-Fi DHCP Event Management ──────────────────────────────── */
 static struct net_mgmt_event_callback mgmt_cb;
 static struct net_mgmt_event_callback wifi_conn_cb;
-static char s_assigned_ip[32] = "Not Connected";
-static bool s_has_ip = false;
 
 static void net_event_handler(struct net_mgmt_event_callback *cb,
                              uint32_t mgmt_event, struct net_if *iface)
