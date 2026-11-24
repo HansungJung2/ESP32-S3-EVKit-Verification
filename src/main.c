@@ -112,11 +112,11 @@ static struct bt_conn *current_conn;
 
 static const struct bt_data ad[] = {
     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-    BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_NUS_SRV_VAL),
+    BT_DATA(BT_DATA_NAME_COMPLETE, "ESP32-S3-Zephyr", 15),
 };
 
 static const struct bt_data sd[] = {
-    BT_DATA(BT_DATA_NAME_COMPLETE, "ESP32-S3-Zephyr", 15),
+    BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_NUS_SRV_VAL),
 };
 
 static void nus_notif_enabled(bool enabled, void *ctx)
