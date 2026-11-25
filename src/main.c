@@ -320,7 +320,7 @@ static void net_event_handler(struct net_mgmt_event_callback *cb,
 static void wifi_conn_handler(struct net_mgmt_event_callback *cb,
                              uint32_t mgmt_event, struct net_if *iface)
 {
-    if (mgmt_event == NET_EVENT_WIFI_CMD_CONNECT_RESULT) {
+    if (mgmt_event == NET_EVENT_WIFI_CONNECT_RESULT) {
         const struct wifi_status *status = (const struct wifi_status *)cb->info;
         if (status && status->status == 0) {
             LOG_INF("[Wi-Fi] Connected to AP! Requesting DHCP IP...");
@@ -338,7 +338,7 @@ static void init_wifi_events(void)
     net_mgmt_add_event_callback(&mgmt_cb);
 
     net_mgmt_init_event_callback(&wifi_conn_cb, wifi_conn_handler,
-                                 NET_EVENT_WIFI_CMD_CONNECT_RESULT);
+                                 NET_EVENT_WIFI_CONNECT_RESULT);
     net_mgmt_add_event_callback(&wifi_conn_cb);
 }
 
@@ -654,7 +654,25 @@ static void http_server_thread_entry(void *p1, void *p2, void *p3)
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n",
                     (int)(sizeof(HTTP_DASHBOARD_HTML) - 1));
                 zsock_send(client_fd, header, hlen, 0);
-                zsock_send(client_fd, HTTP_DASHBOARD_HTML, sizeof(HTTP_DASHBOARD_HTML) - 1, 0);
+
+                size_t to_send = sizeof(HTTP_DASHBOARD_HTML) - 1;
+                const char *p = HTTP_DASHBOARD_HTML;
+                char chunk_buf[512];
+                while (to_send > 0) {
+                    size_t chunk = to_send > sizeof(chunk_buf) ? sizeof(chunk_buf) : to_send;
+                    memcpy(chunk_buf, p, chunk);
+                    int sent = zsock_send(client_fd, chunk_buf, chunk, 0);
+                    if (sent > 0) {
+                        p += sent;
+                        to_send -= sent;
+                        k_msleep(5);
+                    } else if (errno == EAGAIN || errno == ENOBUFS) {
+                        k_msleep(20);
+                    } else {
+                        LOG_WRN("zsock_send failed: %d (errno %d)", sent, errno);
+                        break;
+                    }
+                }
             }
         }
         zsock_close(client_fd);
@@ -925,8 +943,11 @@ static int cmd_app_wifi(const struct shell *sh, size_t argc, char **argv)
         }
         char cmd_buf[192];
         if (argc >= 4) {
-            /* -k 1: WPA2-PSK Personal */
-            snprintf(cmd_buf, sizeof(cmd_buf), "wifi connect -s \"%s\" -p \"%s\" -k 1", argv[2], argv[3]);
+            int key_mgmt = 1;
+            if (argc >= 5) {
+                key_mgmt = atoi(argv[4]);
+            }
+            snprintf(cmd_buf, sizeof(cmd_buf), "wifi connect -s \"%s\" -p \"%s\" -k %d", argv[2], argv[3], key_mgmt);
         } else {
             snprintf(cmd_buf, sizeof(cmd_buf), "wifi connect -s \"%s\" -k 0", argv[2]);
         }
